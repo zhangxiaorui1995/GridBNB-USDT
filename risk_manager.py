@@ -39,7 +39,7 @@ class AdvancedRiskManager:
         balance = await self.trader.exchange.fetch_balance()
         funding_balance = await self.trader.exchange.fetch_funding_balance()
         if not self.trader.symbol_info:
-            self.trader.trade_log.error("交易对信息未初始化")
+            self.logger.error("交易对信息未初始化")
             return 0
         base_amount = (
             float(balance.get('free', {}).get(self.trader.symbol_info['base'], 0)) +

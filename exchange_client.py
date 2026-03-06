@@ -163,26 +163,48 @@ class ExchangeClient:
             self.logger.error(f"获取理财账户余额失败: {str(e)}")
             return {}
 
+    async def fetch_spot_balance(self):
+        """仅获取现货账户余额，不合并理财，不使用缓存"""
+        try:
+            params = {
+                'timestamp': int(time.time() * 1000) + self.time_diff,
+                'type': 'spot'
+            }
+            balance = await self.exchange.fetch_balance(params)
+            self.logger.debug(f"现货余额概要: {balance.get('total', {})}")
+            return balance
+        except Exception as e:
+            self.logger.error(f"获取现货余额失败: {str(e)}")
+            return {'free': {}, 'used': {}, 'total': {}}
+
     async def fetch_balance(self, params=None):
-        """获取账户余额（含缓存机制）"""
+        """获取账户余额（含缓存机制）。
+        
+        返回现货余额，并在 total 中合并理财余额。
+        注意：free 字段仅反映现货可用余额，不包含理财。
+        如需纯现货余额请使用 fetch_spot_balance()。
+        """
         now = time.time()
+        # 如果调用方传入了特定 type 参数，跳过缓存直接请求
+        request_type = (params or {}).get('type')
+        if request_type == 'spot':
+            return await self.fetch_spot_balance()
+
         if now - self.balance_cache['timestamp'] < self.cache_ttl:
             return self.balance_cache['data']
         
         try:
-            params = params or {}
-            params['timestamp'] = int(time.time() * 1000) + self.time_diff
-            balance = await self.exchange.fetch_balance(params)
+            req_params = {}
+            req_params['timestamp'] = int(time.time() * 1000) + self.time_diff
+            balance = await self.exchange.fetch_balance(req_params)
             
             # 获取理财账户余额
             funding_balance = await self.fetch_funding_balance()
             
-            # 合并现货和理财余额
+            # 仅合并理财余额到 total，不影响 free（free 只反映现货可用）
             for asset, amount in funding_balance.items():
                 if asset not in balance['total']:
                     balance['total'][asset] = 0
-                if asset not in balance['free']:
-                    balance['free'][asset] = 0
                 balance['total'][asset] += amount
             
             self.logger.debug(f"账户余额概要: {balance['total']}")
@@ -190,7 +212,6 @@ class ExchangeClient:
             return balance
         except Exception as e:
             self.logger.error(f"获取余额失败: {str(e)}")
-            # 出错时不抛出异常，而是返回一个空的但结构完整的余额字典
             return {'free': {}, 'used': {}, 'total': {}}
     
     async def create_order(self, symbol, type, side, amount, price):

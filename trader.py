@@ -203,6 +203,10 @@ class GridTrader:
                     return False
                 return True
         else:
+            # 价格回到下轨之上，结束本轮买入监测，重置最低价
+            if self.lowest is not None:
+                self.logger.info(f"买入监测结束 | 价格 {current_price:.2f} 回到下轨上方，重置最低价（原值: {self.lowest:.2f}）")
+                self.lowest = None
             self.buying_or_selling = False    # 退出买入或卖出监测
         return False
     
@@ -216,13 +220,10 @@ class GridTrader:
             new_highest = current_price if self.highest is None else max(self.highest, current_price)
             threshold = FLIP_THRESHOLD(self.grid_size)
             
-            # 计算动态触发价格 (基于最高价的回调阈值)
-            dynamic_trigger_price = new_highest * (1 - threshold) if new_highest is not None else initial_upper_band
-            
             # 只在最高价更新时打印日志
             if new_highest != self.highest:
                 self.highest = new_highest
-                # 重新计算动态触发价，基于更新后的最高价
+                # 计算动态触发价，基于更新后的最高价
                 dynamic_trigger_price = self.highest * (1 - threshold)
                 
                 self.logger.info(
@@ -241,6 +242,10 @@ class GridTrader:
                     return False
                 return True
         else:
+            # 价格回落到上轨之下，结束本轮卖出监测，重置最高价
+            if self.highest is not None:
+                self.logger.info(f"卖出监测结束 | 价格 {current_price:.2f} 回落到上轨下方，重置最高价（原值: {self.highest:.2f}）")
+                self.highest = None
             self.buying_or_selling = False    # 退出买入或卖出监测
         return False
     
@@ -325,9 +330,8 @@ class GridTrader:
             try:
                 if not self.initialized:
                     await self.initialize()
-                    await self.position_controller_s1.update_daily_s1_levels()
 
-                # 保留S1水平更新
+                # 每日检查并更新 S1 高低水位（内部有时间判断，不会重复执行）
                 await self.position_controller_s1.update_daily_s1_levels()
 
                 # 获取当前价格
@@ -529,8 +533,11 @@ class GridTrader:
                 # 订单已成交
                 if updated_order['status'] == 'closed':
                     self.logger.info(f"订单已成交 | ID: {order_id}")
-                    # 更新基准价
-                    self.base_price = float(updated_order['price'])
+                    # 更新基准价（优先使用成交均价，回退到委托价）
+                    self.base_price = float(updated_order.get('average') or updated_order['price'])
+                    # 重置价格极值，开始新一轮监测
+                    self.highest = None
+                    self.lowest = None
                     # 清除活跃订单状态
                     self.active_orders[side] = None
                     
@@ -591,7 +598,9 @@ class GridTrader:
                         if check_order['status'] == 'closed':
                             self.logger.info(f"订单已经成交 | ID: {order_id}")
                             # 处理已成交的订单（与上面相同的逻辑）
-                            self.base_price = float(check_order['price'])
+                            self.base_price = float(check_order.get('average') or check_order['price'])
+                            self.highest = None
+                            self.lowest = None
                             self.active_orders[side] = None
                             trade_info = {
                                 'timestamp': time.time(),
@@ -822,12 +831,14 @@ class GridTrader:
                     
                     if order['status'] == 'closed':
                         old_base_price = self.base_price
-                        self.base_price = order['price']
+                        self.base_price = float(order.get('average') or order['price'])
+                        self.highest = None
+                        self.lowest = None
                         await self._adjust_grid_after_trade()
                         # 更新最后成交信息
-                        self.last_trade_price = order['price']
+                        self.last_trade_price = self.base_price
                         self.last_trade_time = current_time
-                        self.logger.info(f"订单已成交 | ID: {order_id} | 价格: {order['price']} | 基准价从 {old_base_price} 更新为 {self.base_price}")
+                        self.logger.info(f"订单已成交 | ID: {order_id} | 均价: {self.base_price} | 基准价从 {old_base_price} 更新为 {self.base_price}")
                         # 清除活跃订单标记
                         for side, active_id in self.active_orders.items():
                             if active_id == order_id:
@@ -1398,11 +1409,11 @@ class GridTrader:
     async def get_macd_data(self):
         """获取MACD数据"""
         try:
-            # 获取K线数据
+            # 获取K线数据（至少需要 26+9=35 根，取100根确保精度）
             klines = await self.exchange.fetch_ohlcv(
                 self.config.SYMBOL,
                 timeframe='1h',
-                limit=100  # MACD需要更多数据来计算
+                limit=100
             )
             
             if not klines:
@@ -1411,15 +1422,21 @@ class GridTrader:
             # 提取收盘价
             closes = [float(x[4]) for x in klines]
             
-            # 计算EMA12和EMA26
-            ema12 = self._calculate_ema(closes, 12)
-            ema26 = self._calculate_ema(closes, 26)
+            # 逐根计算每个时间点的 MACD 线，形成时间序列
+            macd_series = []
+            for i in range(26, len(closes) + 1):
+                segment = closes[:i]
+                ema12 = self._calculate_ema(segment, 12)
+                ema26 = self._calculate_ema(segment, 26)
+                macd_series.append(ema12 - ema26)
             
-            # 计算MACD线
-            macd_line = ema12 - ema26
+            if not macd_series:
+                return None, None
             
-            # 计算信号线（MACD的9日EMA）
-            signal_line = self._calculate_ema([macd_line], 9)
+            # 当前 MACD 线值（序列最后一个）
+            macd_line = macd_series[-1]
+            # 信号线 = MACD 时间序列的 9 期 EMA
+            signal_line = self._calculate_ema(macd_series, 9)
             
             return macd_line, signal_line
             
