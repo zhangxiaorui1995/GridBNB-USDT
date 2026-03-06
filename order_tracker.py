@@ -120,8 +120,9 @@ class OrderTracker:
         
         self.logger.info(f"添加交易记录: {trade}")
         self.trade_history.append(trade)
+        # 超过 100 条时先归档旧记录，而非直接丢弃
         if len(self.trade_history) > 100:
-            self.trade_history = self.trade_history[-100:]
+            self.archive_old_trades()
         try:
             # 先备份当前文件
             self.backup_history()
@@ -173,6 +174,12 @@ class OrderTracker:
                     else:
                         max_loss_streak = max(max_loss_streak, current_streak)
                     current_streak = 1
+            
+            # 统计最后一段连续条纹（循环结束后未更新）
+            if profits[-1] > 0:
+                max_win_streak = max(max_win_streak, current_streak)
+            else:
+                max_loss_streak = max(max_loss_streak, current_streak)
             
             return {
                 'total_trades': total_trades,
@@ -292,7 +299,11 @@ class OrderTracker:
                 export_file = os.path.join(export_dir, f'trades_export_{timestamp}.csv')
                 import csv
                 with open(export_file, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=['timestamp', 'side', 'price', 'amount', 'profit', 'order_id'])
+                    writer = csv.DictWriter(
+                        f,
+                        fieldnames=['timestamp', 'side', 'price', 'amount', 'profit', 'order_id'],
+                        extrasaction='ignore'  # 忽略 S1 等策略产生的额外字段，避免 ValueError
+                    )
                     writer.writeheader()
                     for trade in self.trade_history:
                         writer.writerow(trade)

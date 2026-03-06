@@ -4,6 +4,7 @@ from helpers import LogConfig
 import aiofiles
 import logging
 from datetime import datetime
+import asyncio
 import psutil
 
 class IPLogger:
@@ -37,11 +38,15 @@ class IPLogger:
     def get_records(self):
         return self.ip_records
 
-def get_system_stats():
-    """获取系统资源使用情况"""
-    cpu_percent = psutil.cpu_percent(interval=1)
+async def get_system_stats():
+    """获取系统资源使用情况（非阻塞）"""
+    # cpu_percent(interval=None) 返回上次调用到现在的 CPU 占用，不阻塞事件循环
+    # 首次调用返回 0.0，之后每次都能返回有意义的值
+    cpu_percent = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: psutil.cpu_percent(interval=None)
+    )
     memory = psutil.virtual_memory()
-    memory_used = memory.used / (1024 * 1024 * 1024)  # 转换为GB
+    memory_used = memory.used / (1024 * 1024 * 1024)
     memory_total = memory.total / (1024 * 1024 * 1024)
     return {
         'cpu_percent': cpu_percent,
@@ -71,7 +76,7 @@ async def handle_log(request):
         request.app['ip_logger'].add_record(ip, request.path)
         
         # 获取系统资源状态
-        system_stats = get_system_stats()
+        system_stats = await get_system_stats()
         
         # 读取日志内容
         content = await _read_log_content()

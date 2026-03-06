@@ -1,5 +1,6 @@
 import logging
 import requests
+import asyncio
 from tenacity import retry, stop_after_attempt, wait_exponential
 from config import PUSHPLUS_TOKEN, PUSHPLUS_TIMEOUT
 import time
@@ -46,29 +47,44 @@ def format_trade_message(side, symbol, price, amount, total, grid_size, retry_co
     
     return message
 
-def send_pushplus_message(content, title="交易信号通知", timeout=PUSHPLUS_TIMEOUT):
-    if not PUSHPLUS_TOKEN:
-        logging.error("未配置PUSHPLUS_TOKEN，无法发送通知")
-        return
-    
+def _send_pushplus_sync(content, title, timeout):
+    """同步推送实现，供线程池调用"""
     url = os.getenv('PUSHPLUS_URL', 'https://www.pushplus.plus/send')
     data = {
         "token": PUSHPLUS_TOKEN,
         "title": title,
         "content": content,
-        "template": "txt"  # 使用文本模板
+        "template": "txt"
     }
+    response = requests.post(url, data=data, timeout=timeout)
+    response_json = response.json()
+    if response.status_code == 200 and response_json.get('code') == 200:
+        logging.info(f"消息推送成功: {title}")
+    else:
+        logging.error(f"消息推送失败: 状态码={response.status_code}, 响应={response_json}")
+
+
+def send_pushplus_message(content, title="交易信号通知", timeout=PUSHPLUS_TIMEOUT):
+    """发送推送通知。
+    
+    在异步上下文中自动使用线程池，避免阻塞事件循环；
+    在同步上下文中直接调用（程序启动/错误通知场景）。
+    """
+    if not PUSHPLUS_TOKEN:
+        logging.error("未配置PUSHPLUS_TOKEN，无法发送通知")
+        return
+
+    logging.info(f"正在发送推送通知: {title}")
     try:
-        logging.info(f"正在发送推送通知: {title}")
-        response = requests.post(url, data=data, timeout=timeout)
-        response_json = response.json()
-        
-        if response.status_code == 200 and response_json.get('code') == 200:
-            logging.info(f"消息推送成功: {content}")
-        else:
-            logging.error(f"消息推送失败: 状态码={response.status_code}, 响应={response_json}")
-    except Exception as e:
-        logging.error(f"消息推送异常: {str(e)}", exc_info=True)
+        loop = asyncio.get_running_loop()
+        # 当前在异步上下文中，提交到线程池，不阻塞事件循环
+        loop.run_in_executor(None, _send_pushplus_sync, content, title, timeout)
+    except RuntimeError:
+        # 没有正在运行的事件循环，直接同步调用（启动/关闭阶段）
+        try:
+            _send_pushplus_sync(content, title, timeout)
+        except Exception as e:
+            logging.error(f"消息推送异常: {str(e)}", exc_info=True)
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 async def safe_fetch(method, *args, **kwargs):

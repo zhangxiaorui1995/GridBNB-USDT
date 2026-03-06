@@ -61,8 +61,8 @@ class TradingMonitor:
             "position_ratio": position_ratio,
             # 可以添加更多状态信息
             "initialized": getattr(self.trader, 'initialized', False),
-            "active_buy_order": getattr(self.trader.active_orders, 'buy', None),
-            "active_sell_order": getattr(self.trader.active_orders, 'sell', None),
+            "active_buy_order": self.trader.active_orders.get('buy'),
+            "active_sell_order": self.trader.active_orders.get('sell'),
             "highest_price_monitor": getattr(self.trader, 'highest', None),
             "lowest_price_monitor": getattr(self.trader, 'lowest', None),
         }

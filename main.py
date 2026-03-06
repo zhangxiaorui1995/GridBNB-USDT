@@ -17,6 +17,22 @@ if platform.system() == 'Windows':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         logging.info("已设置Windows SelectorEventLoop策略")
 
+async def _run_web_server_with_restart(trader, max_retries=5):
+    """包装 web server，崩溃后自动重启，最多重试 max_retries 次"""
+    retries = 0
+    while retries < max_retries:
+        try:
+            await start_web_server(trader)
+        except Exception as e:
+            retries += 1
+            logging.error(f"Web服务器崩溃（第{retries}次），{10}秒后重启: {e}")
+            if retries < max_retries:
+                await asyncio.sleep(10)
+            else:
+                logging.error("Web服务器达到最大重启次数，停止重启（交易循环继续运行）")
+                return
+
+
 async def main():
     try:
         # 初始化统一日志配置
@@ -35,14 +51,29 @@ async def main():
         # 初始化交易器
         await trader.initialize()
         
-        # 启动Web服务器
-        web_server_task = asyncio.create_task(start_web_server(trader))
+        # 启动Web服务器（单独监控，崩溃后自动重启，不影响交易循环）
+        web_server_task = asyncio.create_task(_run_web_server_with_restart(trader))
         
-        # 启动交易循环
+        # 启动交易循环（核心任务，异常会向上抛出）
         trading_task = asyncio.create_task(trader.main_loop())
         
-        # 等待所有任务完成
-        await asyncio.gather(web_server_task, trading_task)
+        # 两个任务独立运行：trading_task 崩溃时通知并退出，web_server 崩溃时自动重启
+        done, pending = await asyncio.wait(
+            [web_server_task, trading_task],
+            return_when=asyncio.FIRST_EXCEPTION
+        )
+        
+        for task in done:
+            if task.exception():
+                logging.error(f"关键任务异常退出: {task.exception()}")
+                send_pushplus_message(f"关键任务异常退出: {task.exception()}", "致命错误")
+        
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         
     except Exception as e:
         error_msg = f"启动失败: {str(e)}\n{traceback.format_exc()}"
